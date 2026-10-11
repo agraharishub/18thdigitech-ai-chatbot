@@ -27,7 +27,8 @@ URL or credentials to enter.
 
 ### 🔹 Notify Me (Back in Stock)
 
-- Shoppers ask to be emailed when an out-of-stock product is back
+- Shoppers ask to be emailed when an out-of-stock product is back, and confirm their email address from a link
+  (double opt-in) before any back-in-stock email is sent
 - Catalog sync and emails run automatically every 15 minutes
 - Requests and the synced catalog are shown on the Admin page
 
@@ -46,12 +47,15 @@ URL or credentials to enter.
 
 - Data is stored in an App Builder Database in the region the merchant chooses: Americas (US), Europe (EU), Asia
   Pacific (Japan) or Australia
-- Each store's data is kept separate; unassociating the app deletes the store's data
+- Each store's data is kept separate; unassociating the app deletes the database, all its data and the saved settings
 
 ### 🔹 Secure by Default
 
 - Answers only questions about the store; refuses unrelated requests and prompt-injection attempts
-- Public endpoints are limited to the allowed storefront origins
+- Public endpoints are limited to the allowed storefront origins and rate limited (per shopper and per store)
+- Only enabled catalog products and their public attributes reach the chat (never purchase cost or other internal
+  attributes)
+- Notify me data is deleted when no longer needed, and the Admin page deletes one shopper's data on request
 - Password settings (AI API key, SMTP password, Commerce Integration credentials) are stored encrypted
 - Store access uses Adobe IMS
 
@@ -76,14 +80,9 @@ Please follow the detailed installation instructions in:
 
 ## ⚠️ Important -- Data Region
 
-The store's data is stored in the region chosen **once**, before the app is installed in App Management:
-
-- Merchants installing the app from Adobe Exchange or the App Builder Catalog choose **Data region** in the install
-  form.
-- For your own deploys, set `AIO_DB_REGION` in `.env` (`amer`, `emea`, `apac` or `aus`) before deploying.
-- If neither is set, the merchant chooses it in **App Management → Configure → Data region**.
-
-The database can't be moved afterwards. See [Database](#database).
+The merchant chooses where the store's data is stored in **App Management → Configure → Data region**, before
+clicking **Install**. Installing creates the database in that region; unassociating the app deletes it with all its
+data. See [Database](#database).
 
 ## ⚠️ Important -- Encryption Key
 
@@ -100,7 +99,8 @@ Set **Allowed storefronts** in **Configure** to the storefront origins, comma-se
 https://store.example.com,https://www.store.example.com
 ```
 
-Leaving it empty allows any website. Use that only for development.
+While it is empty, the chat and Notify me endpoints refuse every website: only the chat preview on the AI Chatbot
+Admin page works.
 
 ## ⚠️ Important -- Merchant Settings
 
@@ -108,17 +108,18 @@ Merchants enter these settings in **App Management → AI Commerce Chatbot → C
 
 | Setting                                                           | Notes                                                       |
 | ----------------------------------------------------------------- | ----------------------------------------------------------- |
-| Data region                                                       | Only if it wasn't chosen at install; can't be changed later |
+| Data region                                                       | Choose it before Install; can't be changed while associated |
 | AI provider, AI model, AI API key                                 | The key is stored encrypted                                 |
 | Chatbot name, Store name                                          | The chatbot name is shown in the widget header              |
 | Allowed storefronts                                               | Storefront origins allowed to use the chat                  |
+| Chat messages per shopper per hour / for the store per hour       | Rate limits, default 60 and 3000; 0 = no limit              |
 | Product page URL template, Media base URL                         | Only for Edge Delivery Services / headless storefronts      |
 | SMTP host, port, secure connection, username, password, sender    | For Notify me emails; the password is stored encrypted      |
 | Commerce Integration consumer key / secret, access token / secret | PaaS stores without Adobe IMS only; stored encrypted        |
 
 Saved values apply within about a minute, without a redeploy. They are never read from `.env` or from the request.
 `.env` only holds developer and platform values: Runtime and IMS credentials, `AIO_COMMERCE_CONFIG_ENCRYPTION_KEY`,
-`AIO_DB_REGION`, `LOG_LEVEL` and the legacy Notify me file paths.
+`LOG_LEVEL` and the legacy Notify me file paths.
 
 The currency (PaaS and SaaS) and, on Luma (PaaS), the product page, image and cart URLs are detected from the store.
 
@@ -197,7 +198,9 @@ The widget script is cached for 60 seconds, so changes reach storefronts within 
 | ----------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
 | `chat`                                    | public, origin allow-list          | Chat endpoint called by the widget                                         |
 | `widget`                                  | public                             | Serves the storefront widget script                                        |
-| `notify`                                  | public, origin allow-list          | Saves a Notify me request                                                  |
+| `notify`                                  | public, origin allow-list, limited | Saves a Notify me request and emails the confirmation link                 |
+| `notify-confirm`                          | public, token in the link          | Confirmation link of the Notify me email (double opt-in)                   |
+| `notify-delete`                           | Admin (IMS)                        | Deletes one shopper's Notify me data (privacy / GDPR erasure requests)     |
 | `notify-sync`                             | scheduled every 15 minutes         | Syncs the catalog, sends back-in-stock emails, finishes the database setup |
 | `status`                                  | Admin (IMS)                        | Status for the Admin page, including the database and region               |
 | `notify-data`                             | Admin (IMS)                        | Notify me requests and the synced catalog for the Admin page               |
@@ -213,18 +216,14 @@ The app stores its data in the
 [App Builder Database](https://developer.adobe.com/app-builder/docs/guides/app_builder_guides/storage/database)
 (MongoDB-compatible, `@adobe/aio-lib-db`). Each workspace has **one database, in one region**.
 
-| Collection             | One document per  | Content                                                                         |
-| ---------------------- | ----------------- | ------------------------------------------------------------------------------- |
-| `merchants`            | Commerce store    | Store URL, SaaS/PaaS, `associated` or `unassociated`, dates, history            |
-| `notify_subscriptions` | product and email | Notify me request: `status` `pending`, `sent` or `failed`, send attempts, error |
-| `product_stock`        | product           | Catalog synced by `notify-sync`: stock status, quantity, price                  |
-| `sync_runs`            | `notify-sync` run | Products synced, emails sent and failed, purged requests, error                 |
+| Collection             | One document per  | Content                                                                                        |
+| ---------------------- | ----------------- | ---------------------------------------------------------------------------------------------- |
+| `merchants`            | Commerce store    | Store URL, SaaS/PaaS, `associated` or `unassociated`, dates, history                           |
+| `notify_subscriptions` | product and email | Notify me request: `status` `unconfirmed`, `pending`, `sent` or `failed`, send attempts, error |
+| `product_stock`        | product           | Catalog synced by `notify-sync`: stock status, quantity, price                                 |
+| `sync_runs`            | `notify-sync` run | Products synced, emails sent and failed, purged requests, error                                |
 
-**Data region.** The region to create the database in comes from, in order:
-
-1. the **Data region** chosen in the install form (Adobe Exchange / App Builder Catalog, `configSchema` in
-   `app.config.yaml`), passed to the actions as `AIO_DB_REGION`; for your own deploys, `AIO_DB_REGION` in `.env`;
-2. the **Data region** field in App Management → Configure.
+**Data region.** The database is created in the **Data region** chosen in App Management → Configure.
 
 | Data region                         | Data stored in | Recommended for                                                         |
 | ----------------------------------- | -------------- | ----------------------------------------------------------------------- |
@@ -248,15 +247,16 @@ If the database isn't ready in time, or no region was chosen yet, the installati
 finishes the setup the next time it needs the database: the scheduled `notify-sync`, or opening the Admin page.
 
 **Changing the region.** The database can't be moved. Changing the Data region afterwards has no effect, and the Admin
-page shows a warning. To move it, unassociate the app, delete the database (`aio app db delete`, which deletes **all**
-its data), set the new region, deploy and install again.
+page shows a warning. To move it, unassociate the app (this deletes the database and **all** its data), set the new
+region and associate and install again.
 
 **Associate / unassociate.**
 
-- When a merchant associates and installs the app, the store is added to `merchants` (or set back to `associated`).
-- When a merchant unassociates the app, the store's `notify_subscriptions`, `product_stock` and `sync_runs` documents
-  are deleted. The `merchants` document is kept, set to `unassociated`, with the deleted counts and the history. The
-  database itself is kept, and is never created when unassociating.
+- When a merchant associates and installs the app, the database is created in the chosen region and the store is
+  added to `merchants`.
+- When a merchant unassociates the app, the whole database is deleted (`deleteDatabase`): every collection and all
+  its data, `merchants` included. It is never created when unassociating. The values saved in **Configure** are
+  deleted too (`clearSavedSettings`), so associating again starts from scratch.
 
 **Store isolation.** Every document has a `store_id` (derived from the store's Commerce URL) and a `store_env` (`saas`
 or `paas`), set on the server only. Every query is limited to the associated store and every index starts with
@@ -270,7 +270,20 @@ Data Services** API to each workspace so the credential has these scopes.
 and indexes when the database exists (it uses `IMS_OAUTH_S2S_*` from `.env`), then the `db-setup` action, which runs
 the one-time data migrations. Both are safe to run again. Run the script by hand with `node scripts/db-setup.js`.
 
-**Retention.** `notify-sync` deletes Notify me requests emailed more than 180 days ago.
+**Retention.** `notify-sync` deletes the Notify me data it no longer needs: requests emailed more than 180 days ago,
+failed ones after 90 days, confirmed requests still waiting after 365 days, unconfirmed ones once their confirmation
+link expires (7 days), and sync runs after 90 days. To delete one shopper's requests (e.g. a GDPR erasure request),
+use **Delete a shopper's data** on the Notify me tab of the Admin page.
+
+**Rate limits.** The `chat` action accepts by default 60 messages per shopper (IP address) and 3000 for the whole store
+per hour (**Configure**); `notify` accepts 10 requests per shopper and 300 per store per hour. Counts are kept in App
+Builder State. The store-wide limit is the hard cap: a client can change its IP address or the `X-Forwarded-For`
+header it sends.
+
+**Double opt-in.** A new Notify me request is saved as `unconfirmed` and the shopper gets an email with a confirmation
+link (valid for 7 days, at most one email per 15 minutes per product and address). The link opens a page with a
+**Confirm** button; only pressing it confirms (`pending`), so email scanners that open links can't confirm. Only the
+hash of the link's token is stored. Requests saved before this change stay `pending`.
 
 **Migrating from the JSON files.** Before the database, Notify me requests were stored in App Builder file storage
 (`product/notify.json` and `products.json`, see `NOTIFY_FILE_PATH` and `PRODUCTS_FILE_PATH`). The first `db-setup` run
@@ -293,8 +306,7 @@ needs and redeploy.
 
 ### Distribution (Adobe Exchange / App Builder Catalog)
 
-`app.config.yaml` declares a `configSchema` with the **Data region** field, so merchants choose it when they install
-the app. Package the app with `aio app pack` and upload `dist/app.zip` in Adobe Developer Distribution (private: App
+Merchants choose the Data region in App Management → Configure. Package the app with `aio app pack` and upload `dist/app.zip` in Adobe Developer Distribution (private: App
 Builder Catalog; public: Adobe Exchange). Test it with a private install into a test org before publishing.
 
 ---
@@ -308,7 +320,8 @@ Builder Catalog; public: Adobe Exchange). Test it with a private install into a 
 - Track an order → the order status is shown
 - Ask a store policy question → the answer comes from CMS pages
 - Ask for a human → the bot points to the store's contact details
-- Click **Notify me** on an out-of-stock product → the email is sent once it is back in stock
+- Click **Notify me** on an out-of-stock product → a confirmation email arrives; after confirming, the back-in-stock
+  email is sent once the product is back in stock
 - Admin page → **Database** shows **Connected** and the Data region
 
 ```bash
